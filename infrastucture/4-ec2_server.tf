@@ -73,3 +73,11 @@ output "server_1" {
 output "server_2" {
   value = aws_instance.server_2.public_ip
 }
+
+output "server_1_private" {
+  value = aws_instance.server_1.private_ip
+}
+
+output "server_2_private" {
+  value = aws_instance.server_2.private_ip
+}

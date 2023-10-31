@@ -1,3 +1,165 @@
-- name: provision load balancer and server
+
+- hosts: localhost
+  become: false 
+  gather_facts: false 
+  tasks:
+    # get the server1 private ip
+    - name: Get Server 1 Private IP from Terraform Output
+      shell: terraform output -json | jq -r  '.server_1_private.value'
+      register: server_1_private_ip
+      delegate_to: localhost
+      become: false
+
+    - name: Set Fact for Server 1 Private IP
+      set_fact:
+        server_1_private_ip: "{{ server_1_private_ip.stdout }}"
+    - name: Print Server 1 Private IP
+      debug:
+        msg: "Server 1 Private IP is: {{ server_1_private_ip }}"
+    # get the server2 private ip
+    - name: Get Server 2 Private IP from Terraform Output
+      shell: terraform output -json | jq -r  '.server_2_private.value'
+      register: server_2_private_ip
+      delegate_to: localhost
+      become: false
+
+    - name: Set Fact for Server 2 Private IP
+      set_fact:
+        server_2_private_ip: "{{ server_2_private_ip.stdout }}"
+    - name: Print Server 2 Private IP
+      debug:
+        msg: "Server 2 Private IP is: {{ server_2_private_ip }}"
+
+
+
+- name: provision load balancer and servers
   hosts: all
   become: true
+  vars:
+    server_1_ip: "{{ hostvars['localhost']['server_1_private_ip'] }}"
+    server_2_ip: "{{ hostvars['localhost']['server_2_private_ip'] }}"
+    domain: "test.papavonning.com"
+    certbot_admin_email: shuai190060roy@gmail.com
+
+  handlers:
+    - name: reload nginx
+      when: 
+        - "'load_balancer' in  group_names"
+      service:
+        name: nginx
+        state: reloaded
+
+  tasks:
+    - name: load balancer server
+      when: 
+        - "'load_balancer' in  group_names"
+      block:
+        - name: update the apt 
+          apt:
+            update_cache: yes
+        - name: install required packages
+          apt: 
+            name: nginx
+            state: present
+        - name: backup the nginx config file 
+          shell: cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
+        - name: fetch the nginx.config file to local
+          fetch:
+            src: /etc/nginx/nginx.conf
+            dest: ./tmp/nginx.conf
+            flat: yes
+        - name: Provision Nginx Configuration
+          template:
+            src: ./tmp/nginx.conf.j2
+            dest: /etc/nginx/conf.d/my_app.conf
+          notify: reload nginx
+   
+        - name: Install Certbot and Nginx Plugin
+          apt:
+            name: python3-certbot-nginx
+            state: present
+            update_cache: yes
+        - name: Check if certificate already exists.
+          stat:
+            path: /etc/letsencrypt/live/{{ domain }}/cert.pem
+          register: letsencrypt_cert
+        - name: Stop services to allow certbot to generate a cert.
+          service:
+            name: "nginx"
+            state: stopped
+        - name: Generate new certificate if one doesn't exist.
+          shell: "certbot certonly --standalone --noninteractive --agree-tos --email {{ certbot_admin_email }} -d {{ domain }}"
+          when: letsencrypt_cert.stat.exists == False
+        - name: Provision Nginx Configuration
+          template:
+            src: ./tmp/nginx_https.conf.j2
+            dest: /etc/nginx/conf.d/my_app.conf
+          notify: reload nginx
+          
+    
+    - name: servers
+      when: 
+          - "'server' in  group_names"
+      block:
+        # install go
+        - name: install Go 
+          block:
+          - name: download Go tar file 
+            get_url: 
+              url: 'https://go.dev/dl/go1.21.0.linux-amd64.tar.gz'
+              dest: '/tmp/go1.21.0.linux-amd64.tar.gz'
+              mode: '0755'
+          - name: extract and install Go 
+            unarchive: 
+              src: '/tmp/go1.21.0.linux-amd64.tar.gz'
+              dest: '/usr/local/'
+              remote_src: yes
+          - name: update user PATH to include Go path 
+            lineinfile:
+              path: '/home/{{ ansible_user }}/.profile'
+              line: 'export PATH=$PATH:/usr/local/go/bin'
+              create: yes
+          - name: update root PATH to include Go path 
+            lineinfile:
+              path: '/root/.profile'
+              line: 'export PATH=$PATH:/usr/local/go/bin'
+              create: yes
+          - name: export the PATH 
+            shell: |
+              export PATH=$PATH:/usr/local/go/bin
+            args:
+              executable: /bin/bash
+          - name: export the PATH 
+            shell: |
+              echo 'export PATH=$PATH:/usr/local/go/bin' >> /root/.bashrc
+            # install packages
+        - name: update the apt 
+          shell: apt-get update
+        - name: install required packages
+          apt: 
+            name: 
+            - git
+            - wget 
+            - make 
+            state: present
+
+        - name: Ensure the /tmp directory exists
+          file:
+            path: /tmp/app
+            state: directory
+            mode: '1777'
+        - name: Copy app folder to the server
+          copy:
+            src: ../app/
+            dest: /tmp/app
+            # owner: app
+            # group: app
+            mode: "0644"
+        - name: build go file
+          shell: cd /tmp/app && /usr/local/go/bin/go build -o app 
+        - name: Run Go application
+          shell: nohup /tmp/app/app > /tmp/app.log 2>&1 &
+          async: 5
+          poll: 0
+
+      
